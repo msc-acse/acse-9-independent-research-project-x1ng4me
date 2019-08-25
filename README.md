@@ -1,5 +1,5 @@
 # Parallelization of iSALE-2D Using OpenMP
-### **Independent Research Project**
+### **ACSE-9 Independent Research Project**
 
 ## **Introduction**
 iSALE (impact-SALE) is a well-established shock physics code (written in Fortran 95) that has been developed and used for more than two decades to simulate impact cratering. This project is a development of iSALE-2D, which is an extension of source code with refactoring and adding OpenMP.
