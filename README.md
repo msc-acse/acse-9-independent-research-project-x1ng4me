@@ -55,7 +55,7 @@ make
 make install  
 ```  
 Then the iSALE is fully installed and ready for developments.
-### **Installing Development during the IRP**
+### **Installing Developments during the IRP**
 - Please download the developed source code:  
 ```  
 git clone https://github.com/msc-acse/acse-9-independent-research-project-x1ng4me
