@@ -31,7 +31,7 @@ At this point, check you are using the correct version by running `gcc -v` or `i
 Intel VTune Amplifier is a performance analysis tool targeted for users developing serial and multithreaded applications. The tool is delivered as a Performance Profiler with Intel Performance Snapshots and supports local and remote target analysis on the Windows, Linux, and Android platforms. Though you cannot analyze applications running on the macOS systems, you still can install the VTune Amplifier on macOS and analyze remote targets. Therefore, a remote machine with Linux OS system is required.  
 - Download and install Vtune Amplifier from here: [Vtune](https://software.intel.com/en-us/vtune)
 
-- At this point you should be ready to install iSALE.
+At this point you should be **ready to install iSALE**.
 ## **Getting Started**
 ### **Installing and Compiling of iSALE**
 Once the permission is granted, please clone the iSALE root directory from the GitHub.  
