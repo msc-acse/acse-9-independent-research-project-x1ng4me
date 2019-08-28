@@ -108,6 +108,7 @@ Then, in the Vtune Amplifier UI interface, please click `open results` on the to
   - vtune_output.txt - The output after each test, which includes the the information of the parallelization, and test status  
 - Tests - All tests results during the IRP
   - test.ipynb - The jupyter notebook which includes all tests' output.  
+  - Results - The visualization results from the notebook.
 
 ## **Build With**
 Fortran 95  
