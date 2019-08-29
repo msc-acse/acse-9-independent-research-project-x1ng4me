@@ -9,8 +9,8 @@
 !!
 !! Uses full-donor cell advection.
 !!
-!! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN; Gareth Collins, ICL
-!!
+!! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN; Gareth Collins, ICL; Xianzheng Li, ICL
+!! @Github Alias : x1ng4me(XL)
 !!     Description                                     Programmer    Date
 !!     ------------------------------------------------------------------
 !!     Original version (5.7)                             KAI  2005/03/22
@@ -18,12 +18,13 @@
 !!     Multiple interface tracking from Gareth (6.1)      KAI  2006/05/25
 !!     Conversion into Fortran90                          DE   2007/02/23
 !!     Merged volume and mass advection                   DE   2007/05/20
-!!
+!!     Move out subroutines and add parallelization       XL   2019/08/28
 !<--------------------------------------------------------------------------------
 subroutine advect
   use mod_isale
   use mod_advect
   use mod_identify_mat
+  use omp_lib
   implicit none
   integer i,j,m,l,non(nmat)
   integer cc11,cc12,cc21,cc22,sumcc(nmat)
@@ -36,17 +37,16 @@ subroutine advect
   real*8  sfac,cc(nmat)
   real*8  s(nmat,9),sumout,sumin,matflux
   real*8  masse(nmat),vmat(nmat)
-  real*8  fr,ar
+  real*8  fr,ar,vmod,sfac1
   real*8  zufz,ranval
   real*8  rx1k(nmat),rx2k(nmat),zx1k(nmat),zx2k(nmat)
-  real*8, allocatable ::  ft(:),at(:),VolFlux(:,:,:)
+  real*8, allocatable ::  VolFlux(:,:,:)
   real*8, allocatable ::  initcoordp(:,:,:)
   real*8, allocatable ::  vmom(:,:,:,:,:),vmomp(:,:,:,:)
   real*8, allocatable ::  mp(:,:,:),mvp(:,:)
   real*8, allocatable ::  siep(:,:,:),plwp(:,:)
   real*8, allocatable ::  damagep(:,:),epstrp(:,:)
   real*8, allocatable ::  volstrp(:,:),alphap(:,:,:)
-  ! stresses
   real*8, allocatable :: stresdevp(:,:,:)
   real*8, allocatable :: velp(:,:)
   real*8, allocatable :: dummyfp(:,:,:)
@@ -66,106 +66,100 @@ subroutine advect
   ! +++ Allocate and initialise memory for temporary arrays +++
   ! +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
   allocate(VolFlux(1:8,igs:ige,jgs:jge))
-  VolFlux = 0.D0
- 
-  allocate(vstat(igs:ige,jgs:jge), ft(igs:ige), at(igs:ige))
-  vstat = 'E'
-  ft=0.D0
-  at=0.D0
+  allocate(vstat(igs:ige,jgs:jge))
   allocate(voltran_r(nmat,igs:ige,jgs:jge), voltran_t(nmat,igs:ige,jgs:jge))
-  voltran_r=0.D0
-  voltran_t=0.D0
   allocate(voltran_l(nmat,jgs:jge), voltran_b(nmat,igs:ige))
-  voltran_l=0.D0
-  voltran_b=0.D0
   allocate(damagep(igs:ige,jgs:jge))
-  damagep = 0.D0
   allocate(initcoordp(X:Y,igs:ige,jgs:jge))
-  initcoordp = initcoord
-
-  ! Allocate memory for advecting dummy fields if appropriate
   if (dummyfields) then
      allocate(dummyfp(1:ndummy,igs:ige,jgs:jge))
-     dummyfp=0.D0
   end if
-
-  ! Allocate the momentum advection arrays differently depending on the algorithm
-  if (ADVMOM .eq. ADVMOM_HIS) then
+   if (ADVMOM .eq. ADVMOM_HIS) then
      vmom_dim = 4 ! HIS method advects all four nodal momenta
   else
      vmom_dim = 1 ! SALE method advects one cell-centred set of momenta
-  end if
-  allocate(vmom(X:Y,1:vmom_dim,nmat,igs:ige,jgs:jge), vmomp(X:Y,1:vmom_dim,igs:ige,jgs:jge))
-  vmom = 0.D0
-  vmomp = 0.D0
-
-  allocate(mp(nmat,igs:ige,jgs:jge), mvp(igs:ige,jgs:jge), siep(nmat,igs:ige,jgs:jge))
-  mp = 0.D0
-  mvp = 0.D0
-  siep = 0.D0
-  allocate(volstrp(igs:ige,jgs:jge), alphap(nmat,igs:ige,jgs:jge))
-  volstrp = 0.D0
-  alphap = 0.D0
-  if (.not. hydro) then 
+  end if 
+  allocate(vmom(X:Y,1:vmom_dim,nmat,igs:ige,jgs:jge), vmomp(X:Y,1:vmom_dim,igs:ige,jgs:jge)) 
+  allocate(mp(nmat,igs:ige,jgs:jge), mvp(igs:ige,jgs:jge), siep(nmat,igs:ige,jgs:jge)) 
+  allocate(volstrp(igs:ige,jgs:jge), alphap(nmat,igs:ige,jgs:jge)) 
+  if (.not. hydro) then
      allocate(stresdevp(1:4,igs:ige,jgs:jge))
-     stresdevp = 0.D0
      allocate(plwp(igs:ige,jgs:jge), epstrp(igs:ige,jgs:jge), velp(igs:ige,jgs:jge))
-     plwp = 0.D0
-     epstrp = 0.D0
-     velp = 0.D0
   end if
-
-  ! ########################################################
-  ! first we copy cmc vals (for using symmetry)
-  ! front
-
   ! If Eulerian calculation (not ALE), set the velocity of flow relative to
   ! grid, VREL = VL - VG, equal to flow velocity as grid velocity is zero
   if (ALE_MODE == EULERIAN) VREL = VL
-
-
-  ! +++ Calculate and store volume transfer between cells  
+  
+  ! +++ Put initialization into first loop, add OpenMP in the first loop.
+  ! +++ Initialise memory for temporary arrays.
+  ! +++ Calculate and store volume transfer between cells 
   !$omp parallel private(i,j,fr,ar)
-  !$omp do  
-  do j=js,je
-     do i=is,ie
+  !$omp do 
+  do j=jgs,jge
+     do i=igs,ige
+        VolFlux(:,i,j) = 0.D0
+        voltran_r(:,i,j) = 0.D0
+        voltran_t(:,i,j) = 0.D0
+        voltran_l(i,j) = 0.D0
+        voltran_b(i,j) = 0.D0
+        damagep(i,j) = 0.D0
+        mp(:,i,j) = 0.D0
+        mvp(i,j) = 0.D0
+        siep(:,i,j) = 0.D0
+        volstrp(i,j) = 0.D0
+        alphap(:,i,j) = 0.D0
+        if (.not. hydro) then
+           stresdevp(:,i,j) = 0.D0
+           plwp(i,j) = 0.D0
+           epstrp(i,j) = 0.D0
+           velp(i,j) = 0.D0
+        end if
+        vmom(:,:,:,i,j) = 0.D0
+        vmomp(:,:,i,j) = 0.D0
+        if (dummyfields) then
+           dummyfp(:,i,j) = 0.D0
+        end if
+        vstat(i,j) = 'E'
+        initcoordp(:,i,j) = 0.D0
         fr = 0.D0
         ar = 0.D0
         ! Left side of cell
-        if (i.eq.1) then ! Left boundary
-           if (BCTYPE(LEFT) == 2) then ! Cont. outflow through left boundary
-              ! Compute flux (fr,ar) for right side of cell to mirror
-              VolFlux(FL_LEFT,i,j) = total_flux(i,j,FL_RIGHT,fr,ar)
-           else ! All other boundary conditions
-              ! Zero flux to mirror on boundary
-              VolFlux(FL_LEFT,i,j) = 0.D0
+        if (.not. i.eq.ige .OR. j.eq.jge) then
+           if (i.eq.1) then ! Left boundary
+              if (BCTYPE(LEFT) == 2) then ! Cont. outflow through left boundary
+                 ! Compute flux (fr,ar) for right side of cell to mirror
+                 VolFlux(FL_LEFT,i,j) = total_flux(i,j,FL_RIGHT,fr,ar)
+              else ! All other boundary conditions
+                 ! Zero flux to mirror on boundary
+                 VolFlux(FL_LEFT,i,j) = 0.D0
+              end if
+           else
+              VolFlux(FL_LEFT,i,j) = total_flux(i-1,j,FL_RIGHT,fr,ar)
+              VolFlux(FL_LEFT,i,j) = mirror_flux(fr, ar) 
            end if
-        else
-           VolFlux(FL_LEFT,i,j) = total_flux(i-1,j,FL_RIGHT,fr,ar)
-           VolFlux(FL_LEFT,i,j) = mirror_flux(fr, ar) 
-        end if
 
-        ! Bottom side of cell
-        if (j.eq.1) then ! Bottom boundary
-           if (BCTYPE(BOTTOM) == 2) then ! Cont. outflow through bottom boundary
-              ! Compute flux (ft,at) for top side of cell to mirror
-              VolFlux(FL_BOTTOM,i,j) = total_flux(i,j,FL_TOP,fr,ar)
-           else ! All other boundary conditions
-              ! Zero flux to mirror on boundary
-              VolFlux(FL_BOTTOM,i,j) = 0.D0
+           ! Bottom side of cell
+           if (j.eq.1) then ! Bottom boundary
+              if (BCTYPE(BOTTOM) == 2) then ! Cont. outflow through bottom boundary
+                 ! Compute flux (ft,at) for top side of cell to mirror
+                 VolFlux(FL_BOTTOM,i,j) = total_flux(i,j,FL_TOP,fr,ar)
+              else ! All other boundary conditions
+                 ! Zero flux to mirror on boundary
+                 VolFlux(FL_BOTTOM,i,j) = 0.D0
+              end if
+           else
+              VolFlux(FL_BOTTOM,i,j) = total_flux(i,j-1,FL_TOP,fr,ar)
+              VolFlux(FL_BOTTOM,i,j) = mirror_flux(fr, ar)
            end if
-        else
-           VolFlux(FL_BOTTOM,i,j) = total_flux(i,j-1,FL_TOP,fr,ar)
-           VolFlux(FL_BOTTOM,i,j) = mirror_flux(fr, ar)
+
+           VolFlux(FL_RIGHT,i,j) =total_flux(i,j,FL_RIGHT,fr,ar)
+           VolFlux(FL_TOP,i,j) =total_flux(i,j,FL_TOP,fr,ar)
         end if
-
-        VolFlux(FL_RIGHT,i,j) =total_flux(i,j,FL_RIGHT,fr,ar)
-        VolFlux(FL_TOP,i,j) =total_flux(i,j,FL_TOP,fr,ar)
-
      end do
   end do
   !$omp end do
   !$omp end parallel
+
 
 
   ! **************************************************************************
@@ -219,10 +213,10 @@ subroutine advect
   ! +++ Calculate volume transfer for each cell +++
   ! +++++++++++++++++++++++++++++++++++++++++++++++
   ! Initialise fluxes
-
   ! +++ Construct material boundaries in mixed cells and calculate individual volume fluxes
   ! +++ for each material based on material boundary position
   ! +++ Apply OpenMP for the large loop, using omp do which equals to omp_scheduling(static)
+
   !$omp parallel private(i,j,fr,ar,r1,r2,r3,r4,rx1,rx2,zx1,zx2,sumcc,nompri,cc,nomic,nom,filling),&
   !$omp& private(cmax,mmax,l,m,conc,c11,c21,c12,c22,cc11,cc12,cc21,cc22,ck11,ck12,ck21,ck22,rx1k,rx2k,zx1k,zx2k),&
   !$omp& private(tvmat,matflux,vmat,non,s,ranval)
@@ -483,10 +477,10 @@ subroutine advect
   ! +++++++++++++++++++++++++++++++++++++
   ! +++      Calculate advection      +++
   ! +++++++++++++++++++++++++++++++++++++
-
   ! +++ Calculate advection: account for outflow and influx of fields across cell boundaries;
   ! +++ update material densities and volume fractions.
   ! +++ Use same parallel scheduling method, list all private parameters to avoid conflicts.
+  
   !$omp parallel private(i,j,sumout,s,sumin,tvmat,vmat,tvmat_plus,masse,countmat,matincell),&
   !$omp& private(m,m1,m2,sfac,fluxpart)
   !$omp do
@@ -696,77 +690,108 @@ subroutine advect
 
   ! +++ End secound array loop
 
-  ! +++ Calculate the share of condensed matter around vertices cmv(i,j)
-  call advect_vertex_mass_concentration()
-  ! +++ Compute new vertex masses, update advected stuff...
+  ! +++ Update global fields from temporary fields; 
+  ! +++ Calculate bulk fields for material specific quantities;
+  ! +++ Identify materials in cell based on volume fractions.
+  ! +++ Applied OpenMP
   call advect_finalize()
-  ! +++ Identify the materials in each cell. . .
-  call identify_mat(eps_min)
      
-  ! +++ Store vertex masses and calculate new velocities  
-  !$omp parallel private(i,j)
-  !$omp do  
+  ! +++ Calculate nodal volume fractions from cell volume fractions (REFACTORED);
+  ! +++ Compute nodal mass (REFACTORED) and reciprocal mass, based on cell mass.
+  ! +++ Prepare velocity for update;
+  ! +++ Update nodal velocities based on cell-entered momenta fluxes (REFACTORED);
+  ! +++ Cap nodal velocity to eliminate spurious velocities;
+  ! +++ Remove calling advect_routine.F90 file to reduce communication time (REFACTORED)
+  !$omp parallel private(i,j,sfac1,vmod)
+  sfac1=max(VEL_CUTOFF,VEL_MIN)
+  if (VEL_CUTOFF .le. 0.D0) then
+     sfac1 = 1D32
+  endif
+  !$omp do
   do j=js,jep
      do i=is,iep
+        cmv(:,i,j) = 0.D0
         if (j.eq.1) then
            if (i.eq.1) then
               mvp(i,j) = mvp(i,j) + 0.25d0*mc(i,j)
+              cmv(:,i,j) = cmv(:,i,j) + cmc(:,i,j)
+              call cal_cmv(i,j,mvp)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,4,i,j)*rmv(i,j)
            else if (i.eq.iep) then
               mvp(i,j) = mvp(i,j) + 0.25d0*mc(i-1,j)
+              cmv(:,i,j) = cmv(:,i,j) + cmc(:,i-1,j)
+              call cal_cmv(i,j,mvp)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i-1,j)*rmv(i,j)
            else
               mvp(i,j) = mvp(i,j) + 0.25d0*(mc(i-1,j) + mc(i,j))
+              cmv(:,i,j) = cmv(:,i,j) +0.5D0*(cmc(:,i-1,j)+cmc(:,i,j))
+              call cal_cmv(i,j,mvp)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,1,i-1,j) + vmomp(X:Y,4,i,j))
            end if
         else if (j.eq.jep) then
            if (i.eq.1) then
               mvp(i,j) = mvp(i,j) + 0.25d0*mc(i,j-1)
+              cmv(:,i,j) = cmv(:,i,j) + cmc(:,i,j-1)
+              call cal_cmv(i,j,mvp)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,3,i,j-1)*rmv(i,j)
            else if (i.eq.iep) then
               mvp(i,j) = mvp(i,j) + 0.25d0*mc(i-1,j-1)
+              cmv(:,i,j) = cmv(:,i,j) + cmc(:,i-1,j-1)
+              call cal_cmv(i,j,mvp)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,2,i-1,j-1)*rmv(i,j)
            else
               mvp(i,j) = mvp(i,j) + 0.25d0*(mc(i-1,j-1) + mc(i,j-1))
+              cmv(:,i,j) = cmv(:,i,j) +0.5D0*(cmc(:,i-1,j-1)+cmc(:,i,j-1))
+              call cal_cmv(i,j,mvp)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,2,i-1,j-1) + vmomp(X:Y,3,i,j-1))
            end if
         else if (i.eq.1) then
            if (j.gt.1 .AND. j.lt.jep) then
               mvp(i,j) = mvp(i,j) + 0.25d0*(mc(i,j) + mc(i,j-1))
+              cmv(:,i,j) = cmv(:,i,j) +0.5D0*(cmc(:,i,j)+cmc(:,i,j-1))
+              call cal_cmv(i,j,mvp)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,4,i,j) + vmomp(X:Y,3,i,j-1))
            end if
         else if (i.eq.iep) then
            if (j.gt.1 .AND. j.lt.jep) then
               mvp(i,j) = mvp(i,j) + 0.25d0*(mc(i-1,j) + mc(i-1,j-1))
+              cmv(:,i,j) = cmv(:,i,j) +0.5D0*(cmc(:,i-1,j)+cmc(:,i-1,j-1))
+              call cal_cmv(i,j,mvp)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,1,i-1,j) + vmomp(X:Y,2,i-1,j-1))
            end if
         else
            mvp(i,j) = mvp(i,j) + 0.25d0*mc(i,j)
            mvp(i,j) = mvp(i,j) + 0.25d0*mc(i-1,j)
            mvp(i,j) = mvp(i,j) + 0.25d0*mc(i,j-1)
            mvp(i,j) = mvp(i,j) + 0.25d0*mc(i-1,j-1)
+           cmv(:,i,j) = cmv(:,i,j) +0.25d0*cmc(:,i,j)
+           cmv(:,i,j) = cmv(:,i,j) +0.25d0*cmc(:,i-1,j)
+           cmv(:,i,j) = cmv(:,i,j) +0.25d0*cmc(:,i,j-1)
+           cmv(:,i,j) = cmv(:,i,j) +0.25d0*cmc(:,i-1,j-1)
+           call cal_cmv(i,j,mvp)
+           V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,4,i,j)*rmv(i,j)
+           V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,3,i,j-1)*rmv(i,j)
+           V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i-1,j)*rmv(i,j)
+           V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,2,i-1,j-1)*rmv(i,j)
         end if
-        
-        if (mvp(i,j).gt.0.D0) then
-           rmv(i,j)=1.D0/mvp(i,j)
-           V(X:Y,i,j)  =VL(X:Y,i,j)*mv(i,j)*rmv(i,j)
-           mv(i,j)=mvp(i,j)               
-        else
-           rmv(i,j)  = 0.D0
-           V(:,i,j)  = 0.D0
-           mv(i,j)   = 0.D0
-           VL(:,i,j) = 0.D0
+
+        vmod=sqrt(V(X,i,j)**2+V(Y,i,j)**2)
+        if (vmod.gt.sfac1) then
+           V(X:Y,i,j)=V(X:Y,i,j)*sfac1/vmod
         endif
+
      enddo
   enddo
   !$omp end do
   !$omp end parallel
-  ! +++ Update velocities from advected momenta
-  call update_velocities(vmom_dim,vmomp)
-    
-  ! +++ Brutal attempt to cut out spurious extra high node velocity
-  call crop_velocity()
 
-  ! +++ Set Boundary      
+  ! +++ Set Boundary
   call update_boundary(v)
 
   ! +++ Move tracers here if moving according to material fluxes
   !     Need to call now, before voltran arrays are deallocated
   if (tracer_motion.eq.TR_MAT) call movetracer
-
-  deallocate(vstat, ft, at, voltran_r, voltran_t, voltran_l, voltran_b)
+  deallocate(vstat, voltran_r, voltran_t, voltran_l, voltran_b)
   deallocate(vmom)
   deallocate(vmomp)
   deallocate(mp)
@@ -774,7 +799,6 @@ subroutine advect
   deallocate(siep)
   deallocate(volstrp, alphap, initcoordp, damagep)
   if (dummyfields) deallocate(dummyfp)
-
   if (.not. hydro) deallocate(stresdevp, plwp, epstrp, velp)
 
 
@@ -784,28 +808,28 @@ contains
   !> This subroutine overwrites the original fields with the advected
   !! quantities (dummy arrays) and calculates the new vertex mass
   !!
-  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN
-  !!
+  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN; Xianzheng Li, ICL
+  !! @GitHub: x1ng4me(XL)
   !!     Description                                     Programmer    Date
   !!     ------------------------------------------------------------------
   !!     Original version (5.7).............................KAI  2005/03/22
   !!     Conversion into Fortran90..........................DE   2007/02/24
-  !!
+  !!     Add Parallelization................................XL   2019/08/28
   !< ------------------------------------------------------------------------------
   !The reason for reamining this loop inside the advect is it has a entire loop.
   !Applied OpenMP and refactored part of the subroutine advect_finalize()
   subroutine advect_finalize()
+    use mod_cell, only : cell
     implicit none
     integer :: nump
     real*8, external :: calc_vertex_mass
 
-    ! Cell mass
-    mc = mp(TOTAL,:,:)
     !$omp parallel private(i,j,m)
-    !$omp do    
+    !$omp do
     do j=js,je
        do i=is,ie
-
+          ! Put Cell mass Calculation inside the loop to enable OpenMP for this part
+          mc(i,j) = mp(TOTAL,i,j)
           ! Distension and specific internal energy
           alpha(TOTAL,i,j)=0.D0
           do m=firstmat,nmat
@@ -831,12 +855,13 @@ contains
              plw(i,j)          = plwp(i,j)
              epstrain(i,j)     = epstrp(i,j)
           end if
-
+          call identify_mat_cell(eps_min,oeps_min,cell(i,j,1),i,j,1)
 
        enddo
     enddo
     !$omp end do
     !$omp end parallel
+
   end subroutine advect_finalize
 
 end subroutine advect
@@ -844,16 +869,16 @@ end subroutine advect
   ! ------------------------------------------------------------------------------
   !> Subroutine to restore in- and outfluxes for current cell
   !!
-  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN
-  !!
+  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN; Xianzheng Li, ICL
+  !! @GitHub: x1ng4me(XL)
   !!     Description                                     Programmer    Date
   !!     ------------------------------------------------------------------
   !!     Original version (5.7).............................KAI  2005/03/22
   !!     Conversion into Fortran90..........................DE   2007/02/24
-  !!
+  !!     Move subroutine outside advect.....................XL   2019/08/28
   !< ------------------------------------------------------------------------------
   ! ------------------------------------------------------------------------------
-  ! Move outside the subroutine advect for parallelization  
+  ! Move outside the subroutine advect for parallelization
   subroutine advect_restore_fluxes(i, j, s)
     use mod_isale
     use mod_advect
@@ -892,20 +917,22 @@ end subroutine advect
     enddo
 
   end subroutine advect_restore_fluxes
+  
+
   ! ------------------------------------------------------------------------------
   !> Subroutine to calculate momentum (cell centered) for cell i,j
   !! and material k
   !!
-  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN
-  !!
+  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN; Xianzheng Li, ICL
+  !! @GitHub: x1ng4me(XL)
   !!     Description                                     Programmer    Date
   !!     ------------------------------------------------------------------
   !!     Original version (5.7).............................KAI  2005/03/22
   !!     Conversion into Fortran90..........................DE   2007/02/24
-  !!
+  !!     Move subroutine outside advect.....................XL   2019/08/28
   !< ------------------------------------------------------------------------------
-  ! ------------------------------------------------------------------------------
-  ! Move outside the subroutine advect for parallelization 
+  ! ------------------------------------------------------------------------------  
+  ! Move outside the subroutine advect for parallelization
   subroutine advect_momentum(i, j, sumcc, nom, nomic, vstat, vmom)
     use mod_isale
     use mod_advect
@@ -972,15 +999,15 @@ end subroutine advect
   !! Half-Index Shift algorithm, where each nodal momenta are advected
   !! separately. See Benson (1992, JCP, 100: 143-162) for details.
   !!
-  !! @authors Gareth S. Collins, Imperial College
-  !!
+  !! @authors Gareth S. Collins, Imperial College, Xianzheng Li, ICL
+  !! @Github: x1ng4me(XL)
   !!     Description                                     Programmer    Date
   !!     ------------------------------------------------------------------
   !!     Original version (5.7).............................GSC  2016/09/09
-  !!
+  !!     Move subroutine outside advect.....................XL   2019/08/28
   !< ------------------------------------------------------------------------------
   ! ------------------------------------------------------------------------------
-  ! Move outside the subroutine advect for parallelization
+  ! Move out from subroutine advect for parallelization
   subroutine advect_momentum_his(i, j, nom, nomic, vmom)
     use mod_isale
     use mod_advect
@@ -1006,18 +1033,19 @@ end subroutine advect
     end if
  
   end subroutine advect_momentum_his
+
   ! ------------------------------------------------------------------------------
   !> Subroutine for performing advection of outfluxes for current cell
   !!
-  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN
-  !!
+  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN; Xianzheng Li, ICL
+  !! @GitHub: x1ng4me(XL)
   !!     Description                                     Programmer    Date
   !!     ------------------------------------------------------------------
   !!     Original version (5.7).............................KAI  2005/03/22
   !!     Conversion into Fortran90..........................DE   2007/02/24
-  !!
+  !!     Move subroutine outside advect.....................XL   2019/08/28
   !< ------------------------------------------------------------------------------
-  ! Move outside the subroutine advect for parallelization
+  ! Move out from subroutine advect for parallelization
   subroutine advect_outflux(nomic, nom, vmom_dim, vmom, siep, alphap, masse, fluxpart, volstrp, i, j, sumout, s, tvmat, vmat, velp, plwp, dummyfp, stresdevp, damagep, epstrp, initcoordp, vmomp)
     use mod_isale
     use mod_advect
@@ -1048,16 +1076,12 @@ end subroutine advect
     vmat(VOID) =vmat(VOID) +s(VOID,9)
 
     ! Volume, mass, energy and distension in cell after outflux
-    !$omp parallel private(i, j)
-    !$omp do schedule(dynamic, 10)
     do m=firstmat,nmat
        vmat(m) =vmat(m) +s(m,9)
        masse(m)=max(0.D0,vmat(m)*rol(m,i,j))
        siep(m,i,j)=masse(m)*sie(m,i,j)
        alphap(m,i,j) =masse(m)*alpha(m,i,j)
     enddo
-    !$omp end do
-    !$omp end parallel
 
     ! Other fields are advected by mass or volume
     select case (ADVTYPE)
@@ -1092,20 +1116,21 @@ end subroutine advect
     end do
 
   end subroutine advect_outflux
+
   ! ------------------------------------------------------------------------------
   !> Subroutine for performing advection of fluxes from donor cell
   !! (idon,jdon) to current cell (i,j) through given face (side)...
   !!
-  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN; Gareth Collins, ICL
-  !!
+  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN; Gareth Collins, ICL; Xianzheng Li, ICL
+  !! @Github: x1ng4me(XL)
   !!     Description                                     Programmer    Date
   !!     ------------------------------------------------------------------
   !!     Original version (5.7).............................KAI  2005/03/22
   !!     Conversion into Fortran90..........................DE   2007/02/24
   !!     Modified to improve efficiency.....................GSC  2008/05/22
-  !!
-  !< ------------------------------------------------------------------------------
-  ! Move outside the subroutine advect for parallelization
+  !!     Move subroutine outside advect.....................XL   2019/08/28
+  !< ------------------------------------------------------------------------------  
+  !Move out from subroutine advect for parallelization
   subroutine advect_influx(side,idon,jdon,nomic, nom, vmom_dim, vmom, siep, alphap, masse, fluxpart, volstrp, i, j, sumout, s,&
           &tvmat, vmat, velp, plwp, dummyfp, stresdevp, damagep, epstrp, initcoordp, vmomp)
     use mod_isale
@@ -1195,8 +1220,39 @@ end subroutine advect
     end if
 
   end subroutine advect_influx
+  ! ------------------------------------------------------------------------------
+  !! Use for initialize mass and volume fractions
+  !! needed to be written as a single subroutine 
+  !! because of the order-specific problem in the last loop.
+  !! @authors Xianzheng Li, ICL
+  !! @Github: x1ng4me(XL)
+  !!     Description                                     Programmer    Date
+  !!     ------------------------------------------------------------------
+  !!     Original version (5.7).............................XL      2019/08/28
+  !< ------------------------------------------------------------------------------  
+  subroutine cal_cmv(i,j,mvp)
+    use mod_isale
+    use mod_advect
+    use mod_identify_mat
 
-
+    implicit none
+    integer, intent(in) :: i,j
+    real*8 :: mvp(igs:ige,jgs:jge)
+    !real*8 :: rmv(igs:ige,jgs:jge)
+    !real*8 :: mv(igs:ige,jgs:jge)
+    !real*8 :: V
+    if (mvp(i,j).gt.0.D0) then
+        rmv(i,j)=1.D0/mvp(i,j)
+        V(X:Y,i,j)  =VL(X:Y,i,j)*mv(i,j)*rmv(i,j)
+        mv(i,j)=mvp(i,j)
+    else
+        rmv(i,j)  = 0.D0
+        V(:,i,j)  = 0.D0
+        mv(i,j)   = 0.D0
+        VL(:,i,j) = 0.D0
+        cmv(:,i,j) = 0.D0
+    endif
+  end subroutine cal_cmv
 ! --------------------------------------------------------------------------------
 !> This function determines the priority material number
 !! based on the number of materials in the cell (nomic), 

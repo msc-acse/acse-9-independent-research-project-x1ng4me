@@ -68,6 +68,8 @@ subroutine update_velocities(vmom_dim,vmomp)
      !$omp end do
      !$omp end parallel
   else
+     !$omp parallel private(i,j)
+     !$omp do
      do j=js,jep
         do i=is,iep
            ! The SALE algorithm advects the change in cell-centered momenta. Here the
@@ -104,6 +106,8 @@ subroutine update_velocities(vmom_dim,vmomp)
            end if
         enddo
      enddo
+     !$omp end do
+     !$omp end parallel
   end if
 
 end subroutine update_velocities
