@@ -100,15 +100,22 @@ Then, in the Vtune Amplifier UI interface, please click `open results` on the to
 
 ## **Repository Information**
 - Developments - The source code after refactoring and parallelization  
-  - Old Version - The previous code files I got at the beginning of the IRP, with comments editing  
-  - Mid-term Version - The intermedia version of the code files which finished part of the code refactoring, but before any loops merging and parallelization.  
-  - Latest Version - The latest version of the code files for final submission, which includes the parallelization, code refactoring and documentation.  
+  - advect.F90 - The main with the most code re-factoring and editing works  
+  - advect_routines.F90 - The file which includes subroutine used to update velocities.  
+  - setup_initialize.F90- Allocate and deallocate temporary arrays, initialization.  
 - Script - The running script which should be used for analysis  
   - runscript.bash - The script for running Vtune Amplifier to create analysis report  
   - vtune_output.txt - The output after each test, which includes the the information of the parallelization, and test status  
 - Tests - All tests results during the IRP
   - test.ipynb - The jupyter notebook which includes all tests' output.  
   - Results - The visualization results from the notebook.
+  
+## **Code Version**
+- Old version - The previous code files I got at the beginning of the IRP, with comments editing  
+- Mid-term Version - The intermedia version of the code files which finished part of the code refactoring, but before any loops merging and parallelization. 
+- Latest Version - The code after code re-factoring, loop merging, parallelization and documentation.
+
+**Note:** You can compare the code differences between each version via commit information.
 
 ## **Build With**
 Fortran 95  
