@@ -34,12 +34,12 @@ subroutine advect
   real*8  rx1,rx2,zx1,zx2,c11,c21,c12,c22,qm
   real*8  r1,r2,r3,r4,tvmat,tvmat_plus,conc,cmax
   real*8  sfac,cc(nmat)
-  real*8  VolFlux(8),s(nmat,9),sumout,sumin,matflux
+  real*8  s(nmat,9),sumout,sumin,matflux
   real*8  masse(nmat),vmat(nmat)
   real*8  fr,ar
   real*8  zufz,ranval
   real*8  rx1k(nmat),rx2k(nmat),zx1k(nmat),zx2k(nmat)
-  real*8, allocatable ::  ft(:),at(:)
+  real*8, allocatable ::  ft(:),at(:),VolFlux(:,:,:)
   real*8, allocatable ::  initcoordp(:,:,:)
   real*8, allocatable ::  vmom(:,:,:,:,:),vmomp(:,:,:,:)
   real*8, allocatable ::  mp(:,:,:),mvp(:,:)
@@ -65,7 +65,9 @@ subroutine advect
   ! +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
   ! +++ Allocate and initialise memory for temporary arrays +++
   ! +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-  
+  allocate(VolFlux(1:8,igs:ige,jgs:jge))
+  VolFlux = 0.D0
+ 
   allocate(vstat(igs:ige,jgs:jge), ft(igs:ige), at(igs:ige))
   vstat = 'E'
   ft=0.D0
@@ -121,6 +123,51 @@ subroutine advect
   ! grid, VREL = VL - VG, equal to flow velocity as grid velocity is zero
   if (ALE_MODE == EULERIAN) VREL = VL
 
+
+  ! +++ Calculate and store volume transfer between cells  
+  !$omp parallel private(i,j,fr,ar)
+  !$omp do  
+  do j=js,je
+     do i=is,ie
+        fr = 0.D0
+        ar = 0.D0
+        ! Left side of cell
+        if (i.eq.1) then ! Left boundary
+           if (BCTYPE(LEFT) == 2) then ! Cont. outflow through left boundary
+              ! Compute flux (fr,ar) for right side of cell to mirror
+              VolFlux(FL_LEFT,i,j) = total_flux(i,j,FL_RIGHT,fr,ar)
+           else ! All other boundary conditions
+              ! Zero flux to mirror on boundary
+              VolFlux(FL_LEFT,i,j) = 0.D0
+           end if
+        else
+           VolFlux(FL_LEFT,i,j) = total_flux(i-1,j,FL_RIGHT,fr,ar)
+           VolFlux(FL_LEFT,i,j) = mirror_flux(fr, ar) 
+        end if
+
+        ! Bottom side of cell
+        if (j.eq.1) then ! Bottom boundary
+           if (BCTYPE(BOTTOM) == 2) then ! Cont. outflow through bottom boundary
+              ! Compute flux (ft,at) for top side of cell to mirror
+              VolFlux(FL_BOTTOM,i,j) = total_flux(i,j,FL_TOP,fr,ar)
+           else ! All other boundary conditions
+              ! Zero flux to mirror on boundary
+              VolFlux(FL_BOTTOM,i,j) = 0.D0
+           end if
+        else
+           VolFlux(FL_BOTTOM,i,j) = total_flux(i,j-1,FL_TOP,fr,ar)
+           VolFlux(FL_BOTTOM,i,j) = mirror_flux(fr, ar)
+        end if
+
+        VolFlux(FL_RIGHT,i,j) =total_flux(i,j,FL_RIGHT,fr,ar)
+        VolFlux(FL_TOP,i,j) =total_flux(i,j,FL_TOP,fr,ar)
+
+     end do
+  end do
+  !$omp end do
+  !$omp end parallel
+
+
   ! **************************************************************************
   !                      declaration of some quantities
   ! **************************************************************************
@@ -172,9 +219,14 @@ subroutine advect
   ! +++ Calculate volume transfer for each cell +++
   ! +++++++++++++++++++++++++++++++++++++++++++++++
   ! Initialise fluxes
-  ! Calculate volume transfer from cell to cell; construct material boundaries in mixed cells
-  ! and calculate individual volume fluxes for each material based on material boundary position
 
+  ! +++ Construct material boundaries in mixed cells and calculate individual volume fluxes
+  ! +++ for each material based on material boundary position
+  ! +++ Apply OpenMP for the large loop, using omp do which equals to omp_scheduling(static)
+  !$omp parallel private(i,j,fr,ar,r1,r2,r3,r4,rx1,rx2,zx1,zx2,sumcc,nompri,cc,nomic,nom,filling),&
+  !$omp& private(cmax,mmax,l,m,conc,c11,c21,c12,c22,cc11,cc12,cc21,cc22,ck11,ck12,ck21,ck22,rx1k,rx2k,zx1k,zx2k),&
+  !$omp& private(tvmat,matflux,vmat,non,s,ranval)
+  !$omp do
   do j=js,je
      fr=0.D0
      ar=0.D0
@@ -370,43 +422,15 @@ subroutine advect
         ! side (total_flux/mirror_flux), then modify this total to account for 
         ! the position of the material interfaces (cases_flux)...
 
-        ! Left side of cell
-        if (i.eq.1) then ! Left boundary
-           if (BCTYPE(LEFT) == 2) then ! Cont. outflow through left boundary
-              ! Compute flux (fr,ar) for right side of cell to mirror
-              VolFlux(FL_LEFT) = total_flux(i,j,FL_RIGHT,fr,ar)
-           else ! All other boundary conditions
-              ! Zero flux to mirror on boundary
-              fr = 0.D0; ar = 0.D0
-           end if
-        end if
-        ! Normally, left-side outflux computed as mirror of 
-        ! right-side flux (fr,ar) of left neighbour.
-        VolFlux(FL_LEFT) = mirror_flux(fr,ar)
-        call cases_flux(FL_LEFT,s,VolFlux,ck11,ck12,zx1k,r4,r4,nom,nomic,nompri,cc)
+        call cases_flux(FL_LEFT,s,VolFlux(:,i,j),ck11,ck12,zx1k,r4,r4,nom,nomic,nompri,cc)
 
-        ! Bottom side of cell
-        if (j.eq.1) then ! Bottom boundary
-           if (BCTYPE(BOTTOM) == 2) then ! Cont. outflow through bottom boundary
-              ! Compute flux (ft,at) for top side of cell to mirror
-              VolFlux(FL_BOTTOM) = total_flux(i,j,FL_TOP,ft(i),at(i))
-           else ! All other boundary conditions
-              ! Zero flux to mirror on boundary
-              ft(i) = 0.D0; at(i) = 0.D0
-           end if
-        end if
-        ! Normally, bottom-side ouflux computed as mirror of 
-        ! top-side flux (ft,at) of bottom neighbour.
-        VolFlux(FL_BOTTOM) = mirror_flux(ft(i),at(i))
-        call cases_flux(FL_BOTTOM,s,VolFlux,ck11,ck21,rx1k,r4,r1,nom,nomic,nompri,cc)
+        call cases_flux(FL_BOTTOM,s,VolFlux(:,i,j),ck11,ck21,rx1k,r4,r1,nom,nomic,nompri,cc)
 
         ! Compute right-side outflux and store flux (fr,ar) for left-side of right neighbour 
-        VolFlux(FL_RIGHT) =total_flux(i,j,FL_RIGHT,fr,ar)
-        call cases_flux(FL_RIGHT,s,VolFlux,ck21,ck22,zx2k,r4,r4,nom,nomic,nompri,cc)
+        call cases_flux(FL_RIGHT,s,VolFlux(:,i,j),ck21,ck22,zx2k,r4,r4,nom,nomic,nompri,cc)
 
         ! Compute top-side outflux and store flux (ft,at) for bottom-side of top neighbour 
-        VolFlux(FL_TOP)   =total_flux(i,j,FL_TOP,ft(i),at(i))
-        call cases_flux(FL_TOP,s,VolFlux,ck12,ck22,rx2k,r3,r2,nom,nomic,nompri,cc)
+        call cases_flux(FL_TOP,s,VolFlux(:,i,j),ck12,ck22,rx2k,r3,r2,nom,nomic,nompri,cc)
 
         ! Total outflux of volume of matter/vacuum +++++++++++++++++++++
         tvmat=vol(i,j)*cmc(TOTAL,i,j) ! Calc total volume of matter
@@ -444,25 +468,32 @@ subroutine advect
 
         ! Calculate the cell-centered momentum
         if (ADVMOM .eq. ADVMOM_HIS) then
-           call advect_momentum_his()
+           call advect_momentum_his(i, j, nom, nomic, vmom)
         else
-           call advect_momentum()
+           call advect_momentum(i, j, sumcc, nom, nomic, vstat, vmom)
         end if
 
      enddo
   enddo
+  !$omp end do
+  !$omp end parallel
+  deallocate(VolFlux)
   ! +++ End first array loop
 
   ! +++++++++++++++++++++++++++++++++++++
   ! +++      Calculate advection      +++
   ! +++++++++++++++++++++++++++++++++++++
-  ! account for outflux and influx of field quantities across cell boundaries;
-  ! update material densities and volume fractions
 
+  ! +++ Calculate advection: account for outflow and influx of fields across cell boundaries;
+  ! +++ update material densities and volume fractions.
+  ! +++ Use same parallel scheduling method, list all private parameters to avoid conflicts.
+  !$omp parallel private(i,j,sumout,s,sumin,tvmat,vmat,tvmat_plus,masse,countmat,matincell),&
+  !$omp& private(m,m1,m2,sfac,fluxpart)
+  !$omp do
   do j=js,je
      do i=is,ie
         ! restore in- and outflux of volume
-        call advect_restore_fluxes() 
+        call advect_restore_fluxes(i, j, s) 
 
         ! calculate total amount of in- and outfluxes...
         s(:,FL_OUT)=s(:,FL_RIGHT)+s(:,FL_TOP)+s(:,FL_LEFT)+s(:,FL_BOTTOM)
@@ -480,12 +511,16 @@ subroutine advect
         vmat(VOID)=vol(i,j)-tvmat
 
         ! --------- 1. compute effects of outflux only                        
-        call advect_outflux()
+        call advect_outflux(nomic, nom, vmom_dim, vmom, siep, alphap, masse, fluxpart, volstrp, i, j, sumout, s, tvmat, vmat, velp, plwp, dummyfp, stresdevp, damagep, epstrp, initcoordp, vmomp)
         ! --------- 2. compute effects of influx
-        if (i.gt.1 ) call advect_influx(f_left  ,i-1,j  )
-        if (i.lt.ie) call advect_influx(f_right ,i+1,j  )
-        if (j.gt.1 ) call advect_influx(f_bottom,i  ,j-1)
-        if (j.lt.je) call advect_influx(f_top   ,i  ,j+1)
+        if (i.gt.1 ) call advect_influx(f_left  ,i-1,j  ,nomic, nom, vmom_dim, vmom, siep, alphap, masse, fluxpart, volstrp, i, j, sumout, s,&
+          &tvmat, vmat, velp, plwp, dummyfp, stresdevp, damagep, epstrp, initcoordp, vmomp)
+        if (i.lt.ie) call advect_influx(f_right ,i+1,j  ,nomic, nom, vmom_dim, vmom, siep, alphap, masse, fluxpart, volstrp, i, j, sumout, s,&
+          &tvmat, vmat, velp, plwp, dummyfp, stresdevp, damagep, epstrp, initcoordp, vmomp)
+        if (j.gt.1 ) call advect_influx(f_bottom,i  ,j-1,nomic, nom, vmom_dim, vmom, siep, alphap, masse, fluxpart, volstrp, i, j, sumout, s,&
+          &tvmat, vmat, velp, plwp, dummyfp, stresdevp, damagep, epstrp, initcoordp, vmomp)
+        if (j.lt.je) call advect_influx(f_top   ,i  ,j+1,nomic, nom, vmom_dim, vmom, siep, alphap, masse, fluxpart, volstrp, i, j, sumout, s,&
+          &tvmat, vmat, velp, plwp, dummyfp, stresdevp, damagep, epstrp, initcoordp, vmomp)
         
         ! Retain the total advected volume (before accounting for compression/expansion)
         ! needed to recover advected variables when using transport volumes. . .
@@ -656,21 +691,54 @@ subroutine advect
 
      enddo
   enddo
+  !$omp end do
+  !$omp end parallel
 
   ! +++ End secound array loop
 
-  ! +++ Calculate nodal volume fractions from cell volume fractions
+  ! +++ Calculate the share of condensed matter around vertices cmv(i,j)
   call advect_vertex_mass_concentration()
-  ! +++ Update global fields from temporary fields; 
-  ! +++ Calculate bulk fields for material specific quantities; 
-  ! +++ Calculates nodal mass from cell mass 
+  ! +++ Compute new vertex masses, update advected stuff...
   call advect_finalize()
-  ! +++ Identify materials in cell based on volume fractions
+  ! +++ Identify the materials in each cell. . .
   call identify_mat(eps_min)
      
   ! +++ Store vertex masses and calculate new velocities  
+  !$omp parallel private(i,j)
+  !$omp do  
   do j=js,jep
      do i=is,iep
+        if (j.eq.1) then
+           if (i.eq.1) then
+              mvp(i,j) = mvp(i,j) + 0.25d0*mc(i,j)
+           else if (i.eq.iep) then
+              mvp(i,j) = mvp(i,j) + 0.25d0*mc(i-1,j)
+           else
+              mvp(i,j) = mvp(i,j) + 0.25d0*(mc(i-1,j) + mc(i,j))
+           end if
+        else if (j.eq.jep) then
+           if (i.eq.1) then
+              mvp(i,j) = mvp(i,j) + 0.25d0*mc(i,j-1)
+           else if (i.eq.iep) then
+              mvp(i,j) = mvp(i,j) + 0.25d0*mc(i-1,j-1)
+           else
+              mvp(i,j) = mvp(i,j) + 0.25d0*(mc(i-1,j-1) + mc(i,j-1))
+           end if
+        else if (i.eq.1) then
+           if (j.gt.1 .AND. j.lt.jep) then
+              mvp(i,j) = mvp(i,j) + 0.25d0*(mc(i,j) + mc(i,j-1))
+           end if
+        else if (i.eq.iep) then
+           if (j.gt.1 .AND. j.lt.jep) then
+              mvp(i,j) = mvp(i,j) + 0.25d0*(mc(i-1,j) + mc(i-1,j-1))
+           end if
+        else
+           mvp(i,j) = mvp(i,j) + 0.25d0*mc(i,j)
+           mvp(i,j) = mvp(i,j) + 0.25d0*mc(i-1,j)
+           mvp(i,j) = mvp(i,j) + 0.25d0*mc(i,j-1)
+           mvp(i,j) = mvp(i,j) + 0.25d0*mc(i-1,j-1)
+        end if
+        
         if (mvp(i,j).gt.0.D0) then
            rmv(i,j)=1.D0/mvp(i,j)
            V(X:Y,i,j)  =VL(X:Y,i,j)*mv(i,j)*rmv(i,j)
@@ -683,14 +751,15 @@ subroutine advect
         endif
      enddo
   enddo
-
-  ! +++ Compute reciprocal nodal mass, based on nodal mass. Prepare velocity for update
+  !$omp end do
+  !$omp end parallel
+  ! +++ Update velocities from advected momenta
   call update_velocities(vmom_dim,vmomp)
     
-  ! +++ Update nodal velocities based on cell-entered momenta fluxes
+  ! +++ Brutal attempt to cut out spurious extra high node velocity
   call crop_velocity()
 
-  ! +++ Cap nodal velocity to eliminate spurious velocities
+  ! +++ Set Boundary      
   call update_boundary(v)
 
   ! +++ Move tracers here if moving according to material fluxes
@@ -712,8 +781,8 @@ subroutine advect
 contains
 
   ! ------------------------------------------------------------------------------
-  !> Subroutine to calculate momentum (cell centered) for cell i,j
-  !! and material k
+  !> This subroutine overwrites the original fields with the advected
+  !! quantities (dummy arrays) and calculates the new vertex mass
   !!
   !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN
   !!
@@ -723,88 +792,54 @@ contains
   !!     Conversion into Fortran90..........................DE   2007/02/24
   !!
   !< ------------------------------------------------------------------------------
-  subroutine advect_momentum()
+  !The reason for reamining this loop inside the advect is it has a entire loop.
+  !Applied OpenMP and refactored part of the subroutine advect_finalize()
+  subroutine advect_finalize()
     implicit none
-    integer nvm
+    integer :: nump
+    real*8, external :: calc_vertex_mass
 
-    if (cmc(TOTAL,i,j).eq.0.D0) then
+    ! Cell mass
+    mc = mp(TOTAL,:,:)
+    !$omp parallel private(i,j,m)
+    !$omp do    
+    do j=js,je
+       do i=is,ie
 
-       ! if the cell is empty, there are no cell momenta
-       vmom(X:Y,1,firstmat:nmat,i,j) = 0.d0
+          ! Distension and specific internal energy
+          alpha(TOTAL,i,j)=0.D0
+          do m=firstmat,nmat
+             sie(m,i,j)=siep(m,i,j) 
+             alpha(m,i,j) =max(1.D0,min(mat(m)%alphamax,alphap(m,i,j)))
+             if (cmc(m,i,j).gt.eps_min) &
+                  alpha(TOTAL,i,j)=alpha(TOTAL,i,j) + & 
+                  cmc(m,i,j)/(alpha(m,i,j)*cmc(TOTAL,i,j))  
+          enddo
+          if (alpha(TOTAL,i,j).gt.0.D0) alpha(TOTAL,i,j)=1.D0/alpha(TOTAL,i,j)
+          sie(TOTAL,i,j)  =siep(TOTAL,i,j) 
 
-    elseif (sumcc(VOID).eq.4) then 
+          ! Non-stress-related fields
+          volstrain(i,j)=volstrp(i,j)
+          if (dummyfields) dummyf(1:ndummy,i,j)   =dummyfp(1:ndummy,i,j)
+          initcoord(X:Y,i,j) =initcoordp(X:Y,i,j)
+          damage(i,j)   =max(0.D0,min(1.D0,damagep(i,j)))
 
-       ! If the cell has material, but all four vertices are flagged 
-       ! as void use all vertex velocities to calculate cell momenta
-       !do k=nom(1),nom(nomic)
-       do l=1,nomic
-          m=nom(l)
-          vmom(X:Y,1,m,i,j)=0.25*rol(m,i,j)* & 
-               (VL(X:Y,i+1,j)+VL(X:Y,i+1,j+1)+VL(X:Y,i,j+1)+VL(X:Y,i,j))
+          ! Stress-related fields
+          if (.not. hydro) then 
+             stresdev(1:4,i,j) = stresdevp(1:4,i,j)
+             velo(i,j)         = dsqrt(max(0.D0,velp(i,j)))
+             plw(i,j)          = plwp(i,j)
+             epstrain(i,j)     = epstrp(i,j)
+          end if
+
+
        enddo
-       
-    else
-       
-       ! Otherwise, look at each vertex--if it is flagged as having 
-       ! material, include that vertex in the calculation of the 
-       ! cell-centered momenta
-       do l=1,nomic
-          m=nom(l)
-          nvm=0
-          vmom(X:Y,1,m,i,j)=0.D0
-          if (vstat(i,j).eq.'M') then
-             vmom(X:Y,1,m,i,j)=vmom(X:Y,1,m,i,j)+VL(X:Y,i,j)
-             nvm=nvm+1
-          endif
-          if (vstat(i+1,j).eq.'M') then
-             vmom(X:Y,1,m,i,j)=vmom(X:Y,1,m,i,j)+VL(X:Y,i+1,j)
-             nvm=nvm+1
-          endif
-          if (vstat(i,j+1).eq.'M') then
-             vmom(X:Y,1,m,i,j)=vmom(X:Y,1,m,i,j)+VL(X:Y,i,j+1)
-             nvm=nvm+1
-          endif
-          if (vstat(i+1,j+1).eq.'M') then   
-             vmom(X:Y,1,m,i,j)=vmom(X:Y,1,m,i,j)+VL(X:Y,i+1,j+1)
-             nvm=nvm+1
-          endif
-          vmom(X:Y,1,m,i,j)=rol(m,i,j)*vmom(X:Y,1,m,i,j)/dfloat(nvm)
-       enddo
+    enddo
+    !$omp end do
+    !$omp end parallel
+  end subroutine advect_finalize
 
-    endif
-
-  end subroutine advect_momentum
-  ! ------------------------------------------------------------------------------
-
-  ! ------------------------------------------------------------------------------
-  !> Subroutine to calculate momentum for cell i,j and material k for use in the
-  !! Half-Index Shift algorithm, where each nodal momenta are advected
-  !! separately. See Benson (1992, JCP, 100: 143-162) for details.
-  !!
-  !! @authors Gareth S. Collins, Imperial College
-  !!
-  !!     Description                                     Programmer    Date
-  !!     ------------------------------------------------------------------
-  !!     Original version (5.7).............................GSC  2016/09/09
-  !!
-  !< ------------------------------------------------------------------------------
-  subroutine advect_momentum_his()
-    implicit none
-    
-    ! Only cells with material have momenta to be advected
-    vmom(:,:,:,i,j)=0.D0
-    if (cmc(TOTAL,i,j).gt.0.D0) then
-       do l=1,nomic
-          m=nom(l)
-          vmom(X:Y,1,m,i,j)=rol(m,i,j)*VL(X:Y,i+1,j)
-          vmom(X:Y,3,m,i,j)=rol(m,i,j)*VL(X:Y,i,  j+1)
-          vmom(X:Y,2,m,i,j)=rol(m,i,j)*VL(X:Y,i+1,j+1)
-          vmom(X:Y,4,m,i,j)=rol(m,i,j)*VL(X:Y,i,  j)
-       end do
-    end if
-
-  end subroutine advect_momentum_his
-  ! ------------------------------------------------------------------------------
+end subroutine advect
 
   ! ------------------------------------------------------------------------------
   !> Subroutine to restore in- and outfluxes for current cell
@@ -817,9 +852,17 @@ contains
   !!     Conversion into Fortran90..........................DE   2007/02/24
   !!
   !< ------------------------------------------------------------------------------
-  subroutine advect_restore_fluxes()
-    implicit none
+  ! ------------------------------------------------------------------------------
+  ! Move outside the subroutine advect for parallelization  
+  subroutine advect_restore_fluxes(i, j, s)
+    use mod_isale
+    use mod_advect
 
+    implicit none
+    
+    integer :: m
+    integer, intent(in) :: i, j
+    real*8, intent(out) :: s(nmat,9)
     !DE when using parallel version, restore fluxes based on STORE_FLUX
     do m=1,nmat
 
@@ -850,7 +893,119 @@ contains
 
   end subroutine advect_restore_fluxes
   ! ------------------------------------------------------------------------------
-  
+  !> Subroutine to calculate momentum (cell centered) for cell i,j
+  !! and material k
+  !!
+  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN
+  !!
+  !!     Description                                     Programmer    Date
+  !!     ------------------------------------------------------------------
+  !!     Original version (5.7).............................KAI  2005/03/22
+  !!     Conversion into Fortran90..........................DE   2007/02/24
+  !!
+  !< ------------------------------------------------------------------------------
+  ! ------------------------------------------------------------------------------
+  ! Move outside the subroutine advect for parallelization 
+  subroutine advect_momentum(i, j, sumcc, nom, nomic, vstat, vmom)
+    use mod_isale
+    use mod_advect
+    use mod_identify_mat
+
+    implicit none
+    integer :: nvm
+    integer :: l, m, sumcc(nmat)
+    integer :: nom(nmat), nomic
+    character*1 :: vstat(igs:ige,jgs:jge)
+    ! character*1, intent(in) :: vstat(:,:)
+    integer :: i, j
+    real*8 :: vmom(X:Y,1,nmat,igs:ige,jgs:jge)
+
+    if (cmc(TOTAL,i,j).eq.0.D0) then
+
+       ! if the cell is empty, there are no cell momenta
+       vmom(X:Y,1,firstmat:nmat,i,j) = 0.d0
+
+    elseif (sumcc(VOID).eq.4) then
+
+       ! If the cell has material, but all four vertices are flagged 
+       ! as void use all vertex velocities to calculate cell momenta
+       !do k=nom(1),nom(nomic)
+       do l=1,nomic
+          m=nom(l)
+          vmom(X:Y,1,m,i,j)=0.25*rol(m,i,j)* &
+               (VL(X:Y,i+1,j)+VL(X:Y,i+1,j+1)+VL(X:Y,i,j+1)+VL(X:Y,i,j))
+       enddo
+
+    else
+
+       ! Otherwise, look at each vertex--if it is flagged as having 
+       ! material, include that vertex in the calculation of the 
+       ! cell-centered momenta
+       do l=1,nomic
+          m=nom(l)
+          nvm=0
+          vmom(X:Y,1,m,i,j)=0.D0
+          if (vstat(i,j).eq.'M') then
+             vmom(X:Y,1,m,i,j)=vmom(X:Y,1,m,i,j)+VL(X:Y,i,j)
+             nvm=nvm+1
+          endif
+          if (vstat(i+1,j).eq.'M') then
+             vmom(X:Y,1,m,i,j)=vmom(X:Y,1,m,i,j)+VL(X:Y,i+1,j)
+             nvm=nvm+1
+          endif
+          if (vstat(i,j+1).eq.'M') then
+             vmom(X:Y,1,m,i,j)=vmom(X:Y,1,m,i,j)+VL(X:Y,i,j+1)
+             nvm=nvm+1
+          endif
+          if (vstat(i+1,j+1).eq.'M') then
+             vmom(X:Y,1,m,i,j)=vmom(X:Y,1,m,i,j)+VL(X:Y,i+1,j+1)
+             nvm=nvm+1
+          endif
+          vmom(X:Y,1,m,i,j)=rol(m,i,j)*vmom(X:Y,1,m,i,j)/dfloat(nvm)
+       enddo
+
+    endif
+
+  end subroutine advect_momentum
+  ! ------------------------------------------------------------------------------
+  !> Subroutine to calculate momentum for cell i,j and material k for use in the
+  !! Half-Index Shift algorithm, where each nodal momenta are advected
+  !! separately. See Benson (1992, JCP, 100: 143-162) for details.
+  !!
+  !! @authors Gareth S. Collins, Imperial College
+  !!
+  !!     Description                                     Programmer    Date
+  !!     ------------------------------------------------------------------
+  !!     Original version (5.7).............................GSC  2016/09/09
+  !!
+  !< ------------------------------------------------------------------------------
+  ! ------------------------------------------------------------------------------
+  ! Move outside the subroutine advect for parallelization
+  subroutine advect_momentum_his(i, j, nom, nomic, vmom)
+    use mod_isale
+    use mod_advect
+    use mod_identify_mat
+ 
+    implicit none
+    integer :: l, m
+    ! character*1, intent(in) :: vstat(:,:)
+    integer :: i, j
+    integer :: nom(nmat),nomic
+    real*8 :: vmom(X:Y,4,nmat,igs:ige,jgs:jge)
+ 
+    ! Only cells with material have momenta to be advected
+    vmom(:,:,:,i,j)=0.D0
+    if (cmc(TOTAL,i,j).gt.0.D0) then
+       do l=1,nomic
+          m=nom(l)
+          vmom(X:Y,1,m,i,j)=rol(m,i,j)*VL(X:Y,i+1,j)
+          vmom(X:Y,3,m,i,j)=rol(m,i,j)*VL(X:Y,i,  j+1)
+          vmom(X:Y,2,m,i,j)=rol(m,i,j)*VL(X:Y,i+1,j+1)
+          vmom(X:Y,4,m,i,j)=rol(m,i,j)*VL(X:Y,i,  j)
+       end do
+    end if
+ 
+  end subroutine advect_momentum_his
   ! ------------------------------------------------------------------------------
   !> Subroutine for performing advection of outfluxes for current cell
   !!
@@ -862,21 +1017,47 @@ contains
   !!     Conversion into Fortran90..........................DE   2007/02/24
   !!
   !< ------------------------------------------------------------------------------
-  subroutine advect_outflux()
-    implicit none
+  ! Move outside the subroutine advect for parallelization
+  subroutine advect_outflux(nomic, nom, vmom_dim, vmom, siep, alphap, masse, fluxpart, volstrp, i, j, sumout, s, tvmat, vmat, velp, plwp, dummyfp, stresdevp, damagep, epstrp, initcoordp, vmomp)
+    use mod_isale
+    use mod_advect
+    use mod_identify_mat
 
+    implicit none
+    integer :: m
+    integer :: nomic, nom(nmat), vmom_dim
+    real*8 :: vmom(X:Y,1:vmom_dim,nmat,igs:ige,jgs:jge)
+    ! character*1, intent(in) :: vstat(:,:)
+    real*8 :: siep(nmat,igs:ige,jgs:jge), alphap(nmat,igs:ige,jgs:jge)
+    real*8 :: masse(nmat)
+    real*8 :: fluxpart
+    real*8 :: volstrp(igs:ige,jgs:jge)
+    integer :: i, j
+    real*8 :: sumout, s(nmat,9)
+    real*8 :: tvmat, vmat(nmat)
+    real*8 :: vmomp(X:Y,1:vmom_dim,igs:ige,jgs:jge)
+    real*8 :: velp(igs:ige,jgs:jge), plwp(igs:ige,jgs:jge)
+    real*8 :: dummyfp(1:ndummy,igs:ige,jgs:jge)
+    real*8 :: stresdevp(1:4,igs:ige,jgs:jge)
+    real*8 :: damagep(igs:ige,jgs:jge),epstrp(igs:ige,jgs:jge)
+    real*8 :: initcoordp(X:Y,igs:ige,jgs:jge)
+        
     ! The total volume and mass of material in cell after outflux
     tvmat   =tvmat+sumout
     masse(TOTAL)=max(0.D0,tvmat*rol(TOTAL,i,j))
     vmat(VOID) =vmat(VOID) +s(VOID,9)
 
     ! Volume, mass, energy and distension in cell after outflux
+    !$omp parallel private(i, j)
+    !$omp do schedule(dynamic, 10)
     do m=firstmat,nmat
        vmat(m) =vmat(m) +s(m,9)
        masse(m)=max(0.D0,vmat(m)*rol(m,i,j))
        siep(m,i,j)=masse(m)*sie(m,i,j)
        alphap(m,i,j) =masse(m)*alpha(m,i,j)
     enddo
+    !$omp end do
+    !$omp end parallel
 
     ! Other fields are advected by mass or volume
     select case (ADVTYPE)
@@ -897,21 +1078,20 @@ contains
     damagep(i,j)=fluxpart*damage(i,j)
 
     ! stresses after outflux
-    if (.not. hydro) then 
+    if (.not. hydro) then
        stresdevp(1:4,i,j)=fluxpart*stresdev(1:4,i,j)
-       velp(i,j)         =masse(TOTAL)*velo(i,j)*velo(i,j) 
+       velp(i,j)         =masse(TOTAL)*velo(i,j)*velo(i,j)
        epstrp(i,j)       =fluxpart*epstrain(i,j)
-       plwp(i,j)         =masse(TOTAL)*plw(i,j) 
+       plwp(i,j)         =masse(TOTAL)*plw(i,j)
     end if
 
     ! momentum after outflux (according to volume)
     vmomp(X:Y,:,i,j)=0.D0
     do m=firstmat,nmat
-       vmomp(X:Y,:,i,j)=vmomp(X:Y,:,i,j)+s(m,9)*vmom(X:Y,:,m,i,j) 
+       vmomp(X:Y,:,i,j)=vmomp(X:Y,:,i,j)+s(m,9)*vmom(X:Y,:,m,i,j)
     end do
-       
-  end subroutine advect_outflux
 
+  end subroutine advect_outflux
   ! ------------------------------------------------------------------------------
   !> Subroutine for performing advection of fluxes from donor cell
   !! (idon,jdon) to current cell (i,j) through given face (side)...
@@ -925,7 +1105,13 @@ contains
   !!     Modified to improve efficiency.....................GSC  2008/05/22
   !!
   !< ------------------------------------------------------------------------------
-  subroutine advect_influx(side,idon,jdon)
+  ! Move outside the subroutine advect for parallelization
+  subroutine advect_influx(side,idon,jdon,nomic, nom, vmom_dim, vmom, siep, alphap, masse, fluxpart, volstrp, i, j, sumout, s,&
+          &tvmat, vmat, velp, plwp, dummyfp, stresdevp, damagep, epstrp, initcoordp, vmomp)
+    use mod_isale
+    use mod_advect
+    use mod_identify_mat
+
     implicit none
     integer, intent(in) :: side !< Integer flag for cell face
     integer, intent(in) :: idon !< i-cell index for donor cell
@@ -933,6 +1119,23 @@ contains
     ! Local memory
     real*8 :: tflux,volmatin
 
+    integer :: m
+    integer :: nomic, nom(nmat), vmom_dim
+    real*8 :: vmom(X:Y,1:vmom_dim,nmat,igs:ige,jgs:jge)
+    ! character*1, intent(in) :: vstat(:,:)
+    real*8 :: siep(nmat,igs:ige,jgs:jge), alphap(nmat,igs:ige,jgs:jge)
+    real*8 :: masse(nmat)
+    real*8 :: fluxpart
+    real*8 :: volstrp(igs:ige,jgs:jge)
+    integer :: i, j
+    real*8 :: sumout, s(nmat,9)
+    real*8 :: tvmat, vmat(nmat)
+    real*8 :: vmomp(X:Y,1:vmom_dim,igs:ige,jgs:jge)
+    real*8 :: velp(igs:ige,jgs:jge), plwp(igs:ige,jgs:jge)
+    real*8 :: dummyfp(1:ndummy,igs:ige,jgs:jge)
+    real*8 :: stresdevp(1:4,igs:ige,jgs:jge)
+    real*8 :: damagep(igs:ige,jgs:jge),epstrp(igs:ige,jgs:jge)
+    real*8 :: initcoordp(X:Y,igs:ige,jgs:jge)
     ! Add influx of vacuum to void volume
     vmat(VOID) =vmat(VOID)+s(VOID,side)
 
@@ -969,7 +1172,6 @@ contains
 
        ! switch now to advection according to volume if desired
        if (advtype==ADVTYPE_VOL) fluxpart = volmatin
-
        ! Sum total mass (or volume) fluxes over materials
        tflux    = tflux   + fluxpart
 
@@ -985,7 +1187,7 @@ contains
        damagep(i,j)  = damagep(i,j)  + tflux*damage(idon,jdon)
 
        ! shear stresses and strains
-       if (.not. hydro) then 
+       if (.not. hydro) then
           stresdevp(1:4,i,j) = stresdevp(1:4,i,j) + tflux*stresdev(1:4,idon,jdon)
           epstrp(i,j)   = epstrp(i,j)   + tflux*epstrain(idon,jdon)
        end if
@@ -993,69 +1195,6 @@ contains
     end if
 
   end subroutine advect_influx
-
-  ! ------------------------------------------------------------------------------
-  !> This subroutine overwrites the original fields with the advected
-  !! quantities (dummy arrays) and calculates the new vertex mass
-  !!
-  !! @authors Kai Wuennemann, MfN; Dirk Elbeshausen, MfN
-  !!
-  !!     Description                                     Programmer    Date
-  !!     ------------------------------------------------------------------
-  !!     Original version (5.7).............................KAI  2005/03/22
-  !!     Conversion into Fortran90..........................DE   2007/02/24
-  !!
-  !< ------------------------------------------------------------------------------
-  subroutine advect_finalize()
-    implicit none
-    integer :: nump
-    real*8, external :: calc_vertex_mass
-
-    ! Cell mass
-    mc = mp(TOTAL,:,:)
-    
-    do j=js,je
-       do i=is,ie
-
-          ! Distension and specific internal energy
-          alpha(TOTAL,i,j)=0.D0
-          do m=firstmat,nmat
-             sie(m,i,j)=siep(m,i,j) 
-             alpha(m,i,j) =max(1.D0,min(mat(m)%alphamax,alphap(m,i,j)))
-             if (cmc(m,i,j).gt.eps_min) &
-                  alpha(TOTAL,i,j)=alpha(TOTAL,i,j) + & 
-                  cmc(m,i,j)/(alpha(m,i,j)*cmc(TOTAL,i,j))  
-          enddo
-          if (alpha(TOTAL,i,j).gt.0.D0) alpha(TOTAL,i,j)=1.D0/alpha(TOTAL,i,j)
-          sie(TOTAL,i,j)  =siep(TOTAL,i,j) 
-
-          ! Non-stress-related fields
-          volstrain(i,j)=volstrp(i,j)
-          if (dummyfields) dummyf(1:ndummy,i,j)   =dummyfp(1:ndummy,i,j)
-          initcoord(X:Y,i,j) =initcoordp(X:Y,i,j)
-          damage(i,j)   =max(0.D0,min(1.D0,damagep(i,j)))
-
-          ! Stress-related fields
-          if (.not. hydro) then 
-             stresdev(1:4,i,j) = stresdevp(1:4,i,j)
-             velo(i,j)         = dsqrt(max(0.D0,velp(i,j)))
-             plw(i,j)          = plwp(i,j)
-             epstrain(i,j)     = epstrp(i,j)
-          end if
-
-          ! Compute vertex mass
-          qm=0.25d0*mc(i,j)
-          mvp(i+1,j)  = mvp(i+1,j)   + qm
-          mvp(i+1,j+1)= mvp(i+1,j+1) + qm
-          mvp(i,j+1)  = mvp(i,j+1)   + qm
-          mvp(i,j)    = mvp(i,j)     + qm
-
-       enddo
-    enddo
-
-  end subroutine advect_finalize
-
-end subroutine advect
 
 
 ! --------------------------------------------------------------------------------

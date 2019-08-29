@@ -4,14 +4,14 @@
 ! --------------------------------------------------------------------------------
 !> Subroutine to update velocities according to momenta change   
 !!
-!! @authors  Kai Wuennemann, MfN; Dirk Elbeshausen, MfN
-!!
+!! @authors  Kai Wuennemann, MfN; Dirk Elbeshausen, MfN; Xianzheng Li, ICL
+!! @GitHub: x1ng4me(XL)
 !!     Description                                     Programmer    Date
 !!     ------------------------------------------------------------------
 !!     Original version (5.7).............................KAI  2005/03/22
 !!     Conversion into Fortran90..........................DE   2007/02/24
 !!     Modified to include HIS algorithm..................GSC  2016/09/09
-!!
+!!     Remove race condition for parallelization..........XL   2019/08/28
 !<--------------------------------------------------------------------------------
 subroutine update_velocities(vmom_dim,vmomp)
   use mod_isale
@@ -21,31 +21,87 @@ subroutine update_velocities(vmom_dim,vmomp)
   integer i,j
   real*8 :: qmomv(X:Y)       ! Nodal momenta changes for SALE algorithm
   real*8 :: qmomv_b(X:Y,1:4) ! Nodal momenta changes for HIS algorithm
-
-  if (vmom_dim .eq. 4) then
-     do j=js,je
-        do i=is,ie
+  if (vmom_dim.eq.4) then
+     ! Refactored the velocities update loop, change loops over nodes to cells
+     ! Make sure the code after adding OpenMP will not have conflicts or overwritting
+     ! Consider boundary condition and use 'if statement' separate the code.
+     !$omp parallel private(i,j)
+     !$omp do
+     do j=js,jep
+        do i=is,iep    
            ! The HIS algorithm advects the change in each nodal momentum component separately
            ! Here the advected momentum change of the relevant node is used to update the
            ! nodal velocity. The factor of 1/4 is because each nodal momentum component is
            ! advected four times (from each of the neigbouring cells) and then averaged. . .
-           qmomv_b(X:Y,1:4) = 0.25D0*vmomp(X:Y,1:4,i,j)
-           V(X:Y,i+1,j)   = V(X:Y,i+1,j)   + qmomv_b(X:Y,1)*rmv(i+1,j)
-           V(X:Y,i+1,j+1) = V(X:Y,i+1,j+1) + qmomv_b(X:Y,2)*rmv(i+1,j+1)
-           V(X:Y,i,j+1)   = V(X:Y,i,j+1)   + qmomv_b(X:Y,3)*rmv(i,j+1)
-           V(X:Y,i,j)     = V(X:Y,i,j)     + qmomv_b(X:Y,4)*rmv(i,j)           
+           if (j.eq.1) then
+              if (i.eq.1) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,4,i,j)*rmv(i,j)
+              else if (i.eq.iep) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i-1,j)*rmv(i,j)
+              else
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,1,i-1,j) + vmomp(X:Y,4,i,j))
+              end if
+           else if (j.eq.jep) then
+              if (i.eq.1) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,3,i,j-1)*rmv(i,j)
+              else if (i.eq.iep) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,2,i-1,j-1)*rmv(i,j)
+              else
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,2,i-1,j-1) + vmomp(X:Y,3,i,j-1))
+              end if
+           else if (i.eq.1) then
+              if (j.gt.1 .AND. j.lt.jep) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,4,i,j) + vmomp(X:Y,3,i,j-1))
+              end if
+           else if (i.eq.iep) then
+              if (j.gt.1 .AND. j.lt.jep) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,1,i-1,j) + vmomp(X:Y,2,i-1,j-1))
+              end if
+           else
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,4,i,j)*rmv(i,j)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,3,i,j-1)*rmv(i,j)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i-1,j)*rmv(i,j)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,2,i-1,j-1)*rmv(i,j)
+           end if
         enddo
      enddo
+     !$omp end do
+     !$omp end parallel
   else
-     do j=js,je
-        do i=is,ie
+     do j=js,jep
+        do i=is,iep
            ! The SALE algorithm advects the change in cell-centered momenta. Here the
            ! momenta changes are partitioned equally among the cell nodes. . .
-           qmomv(X:Y) = 0.25D0*vmomp(X:Y,1,i,j)
-           V(X:Y,i+1,j)   = V(X:Y,i+1,j)   + qmomv(X:Y)*rmv(i+1,j)
-           V(X:Y,i+1,j+1) = V(X:Y,i+1,j+1) + qmomv(X:Y)*rmv(i+1,j+1)
-           V(X:Y,i,j+1)   = V(X:Y,i,j+1)   + qmomv(X:Y)*rmv(i,j+1)
-           V(X:Y,i,j)     = V(X:Y,i,j)     + qmomv(X:Y)*rmv(i,j)           
+           if (j.eq.1) then
+              if (i.eq.1) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i,j)*rmv(i,j)
+              else if (i.eq.iep) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i-1,j)*rmv(i,j)
+              else
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,1,i-1,j) + vmomp(X:Y,1,i,j))
+              end if
+           else if (j.eq.jep) then
+              if (i.eq.1) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i,j-1)*rmv(i,j)
+              else if (i.eq.iep) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i-1,j-1)*rmv(i,j)
+              else
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,1,i-1,j-1) + vmomp(X:Y,1,i,j-1))
+              end if
+           else if (i.eq.1) then
+              if (j.gt.1 .AND. j.lt.jep) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,1,i,j) + vmomp(X:Y,1,i,j-1))
+              end if
+           else if (i.eq.iep) then
+              if (j.gt.1 .AND. j.lt.jep) then
+                 V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*rmv(i,j)*(vmomp(X:Y,1,i-1,j) + vmomp(X:Y,1,i-1,j-1))
+              end if
+           else
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i,j)*rmv(i,j)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i,j-1)*rmv(i,j)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i-1,j)*rmv(i,j)
+              V(X:Y,i,j) = V(X:Y,i,j) + 0.25D0*vmomp(X:Y,1,i-1,j-1)*rmv(i,j)
+           end if
         enddo
      enddo
   end if
