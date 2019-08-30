@@ -83,7 +83,7 @@ vim advect.F90 (for example)
 ```  
 cp runscript.bash <your file path>  
 ```  
-- Vtune Amplifier UI interface has some issues with running multi-threads' jobs. To get the summary of the ruuning status, hot-spots analysis and hyperperformance reports, please run the Vtune Amplifier in the command line with:  
+- Vtune Amplifier UI interface has some issues with running multi-threads' jobs. To get the summary of the running status, hot-spots analysis and hyperperformance reports, please run the Vtune Amplifier in the command line with:  
 ```  
 cd <your install directory for the sample cases>  
 
@@ -92,7 +92,7 @@ cd <your install directory for the sample cases>
 The Vtune Amplifier will create a file folder named like `r001hs` in your directory for the sample cases.  
 Please copy the whole folder from the remote machine to your local computer to check the results.  
 ```  
-scp -r <host-name>:<your install directory for the sample cases>/r000hs .  
+scp -r <host-name>:<your install directory for the sample cases>/r001hs .  
 ```  
 Then, in the Vtune Amplifier UI interface, please click `open results` on the top left corner, and locate the folder you copied to your computer, open the `*.amplxe` file.
 
