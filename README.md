@@ -130,5 +130,5 @@ Python 3
   
 ## **Acknowledgments**
 - Apologies for any inconvenience due to the permission of the source code  
-- Thanks to the support from my supervisor Prof. Gareth Collins and Dr. Thomas Davison.  
+- Thanks for the support from my supervisor Prof. Gareth Collins and Dr. Thomas Davison.  
 - Thanks for the advice from Prof. Gerard Gorman.  
